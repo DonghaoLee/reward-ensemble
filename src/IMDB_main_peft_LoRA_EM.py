@@ -10,33 +10,28 @@ from datasets import load_dataset
 import wandb
 
 from model import RewardModel
-from utils import HelpSteer_pair_generate
 
 inds = 10
-torch.set_default_dtype(torch.float16)
 # set device
 device = 'cuda:1'
 device_map = {
     '': device,
 }
+
 nf4_config = BitsAndBytesConfig(
    load_in_4bit=True,
    bnb_4bit_quant_type="nf4",
    bnb_4bit_use_double_quant=True,
    bnb_4bit_compute_dtype=torch.bfloat16
 )
-wandb.init(
-    project = 'mix reward model with LoRA',
-    name = ''
-)
 
-tokenizer = AutoTokenizer.from_pretrained('mistralai/Mistral-7B-v0.1')
+tokenizer = AutoTokenizer.from_pretrained('facebook/opt-350m')
 tokenizer.padding_side = 'right'
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.add_eos_token = True
 
 model = AutoModel.from_pretrained(
-    'mistralai/Mistral-7B-v0.1',
+    'facebook/opt-350m',
     quantization_config=nf4_config,
     device_map = device_map,
     torch_dtype = torch.bfloat16
@@ -46,7 +41,7 @@ model = prepare_model_for_kbit_training(model)
 config = LoraConfig(
     r=16, 
     lora_alpha=16, 
-    target_modules=['k_proj', 'q_proj', 'v_proj', 'o_proj', "gate_proj", "down_proj", "up_proj"], 
+    target_modules=['k_proj', 'q_proj', 'v_proj', 'out_proj', "fc1", "fc2"], 
     lora_dropout=0.05, 
     bias="none", 
     task_type="CAUSAL_LM"
@@ -56,11 +51,10 @@ for ind in range(inds):
     model.add_adapter(config, 'adapter_' + str(ind))
 model.set_adapter('adapter_0')
 reward_model = RewardModel(tokenizer, model, inds = inds, device = device)
-#for n, p in reward_model.named_parameters():
-#    print(n, p.dtype, p.requires_grad, p.device)
+for n, p in reward_model.named_parameters():
+    print(n, p.dtype, p.requires_grad, p.device)
 
-dataset = load_dataset('nvidia/HelpSteer', split="train")
-first_indices, pair_map = HelpSteer_pair_generate()
+dataset = load_dataset('imdb', split="train")
 
 optimizer = torch.optim.Adam(reward_model.parameters(), lr = 0.00001, betas=(0.9, 0.95))
 
@@ -68,9 +62,8 @@ start_time = time.time()
 batch = 1
 ratio = 0.5
 
-# test save
 for epoch in range(5): # epochs
-    np.random.shuffle(first_indices)
+    #dataset.shuffle()
     for i in range(len(first_indices) // batch):
         temp_inds = first_indices[i * batch : (i + 1) * batch]
         temp_pairs = pair_map[temp_inds]
@@ -154,7 +147,7 @@ for epoch in range(5): # epochs
             optimizer.step()
             optimizer.zero_grad()
 
-    torch.save(reward_model.state_dict(), 'ckpt/HelpSteer_mix_0.5_epoch_' + str(epoch) + '.ckpt')
+    torch.save(reward_model.state_dict(), 'ckpt/IMDB_EM_0.5_epoch_' + str(epoch) + '.ckpt')
 
 end_time = time.time()
 print('time:', end_time - start_time)
