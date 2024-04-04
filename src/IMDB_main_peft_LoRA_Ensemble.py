@@ -12,7 +12,7 @@ import wandb
 from model import RewardModel
 
 inds = 10
-torch.set_default_dtype(torch.float16)
+#torch.set_default_dtype(torch.float16)
 # set device
 device = 'cuda:1'
 device_map = {
@@ -30,18 +30,23 @@ tokenizer.padding_side = 'right'
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.add_eos_token = True
 
-sentiment_score_model = AutoModelForSequenceClassification.from_pretrained("lvwerra/distilbert-imdb")
+sentiment_score_model = AutoModelForSequenceClassification.from_pretrained(
+    "lvwerra/distilbert-imdb",
+    device_map = device_map,
+    #torch_dtype=torch.float16
+)
 def sentiment_positive_prob(prompts):
-    t = sentiment_score_tokenizer(prompts, return_tensors='pt', padding=True, truncation=True)
-    out = sentiment_score_model(**t)
-    posi_prob = torch.softmax(out[0], dim=-1)[:, 1]
+    with torch.no_grad():
+        t = sentiment_score_tokenizer(prompts, return_tensors='pt', padding=True, truncation=True).to(device)
+        out = sentiment_score_model(**t)
+        posi_prob = torch.softmax(out[0], dim=-1)[:, 1].to('cpu')
     return posi_prob
 
 model = AutoModel.from_pretrained(
     'facebook/opt-350m',
-    device_map = device_map
+    device_map = device_map,
+    #torch_dtype=torch.float16
 )
-model = prepare_model_for_kbit_training(model)
 
 config = LoraConfig(
     r=16, 
@@ -55,29 +60,35 @@ config = LoraConfig(
 for ind in range(inds):
     model.add_adapter(config, 'adapter_' + str(ind))
 model.set_adapter('adapter_0')
-reward_model = RewardModel(tokenizer, model, inds = inds, device = device)
-for n, p in reward_model.named_parameters():
-    print(n, p.dtype, p.requires_grad, p.device)
+reward_model = RewardModel(
+    tokenizer, 
+    model, 
+    inds = inds, 
+    device = device, 
+    num_padding_at_beginning=1
+)
+#for n, p in reward_model.named_parameters():
+#    print(n, p.dtype, p.requires_grad, p.device)
 
 dataset = load_dataset('imdb', split="train")
 
 optimizer = torch.optim.Adam(reward_model.parameters(), lr = 0.00001, betas=(0.9, 0.95))
 
 start_time = time.time()
-batch = 2
+batch = 10
 ratio = 0.5
 
 for epoch in range(5): # epochs
-    #dataset.shuffle()
+    dataset.shuffle()
     for i in range(len(dataset['text']) // batch):
         win_flag = []
         
         prompt = dataset['text'][i * batch : (i + 1) * batch]
-        token = tokenizer(sentence_input_0 + sentence_input_1,
+        token = tokenizer(prompt,
                           padding = True,
                           truncation = True,
                           return_tensors = 'pt',
-                          max_length=1024)
+                          max_length=512)
         #print(i, torch.sum(token['attention_mask'], dim=-1))
         verbosity_metric = torch.sum(token['attention_mask'], dim=-1)
         verbosity_metric = 5 * (verbosity_metric - 266.5457) / 138.8023
@@ -88,12 +99,14 @@ for epoch in range(5): # epochs
             verbosity_0 = verbosity_metric[k]
             sentiment_1 = sentiment_metric[k + batch // 2]
             verbosity_1 = verbosity_metric[k + batch // 2]
-            p_sentiment = torch.sigmoid(torch.tensor(helpfulness_0 - helpfulness_1))
-            p_verbosity = torch.sigmoid(torch.tensor(verbosity_0 - verbosity_1))
-            win_flag.append([torch.rand(1).item() < p_sentiment, torch.rand(1).item() < p_verbosity])
+            p_sentiment = torch.sigmoid(sentiment_0 - sentiment_1)
+            p_verbosity = torch.sigmoid(verbosity_0 - verbosity_1)
+            win_flag.append([torch.rand(1).item() < p_sentiment.item(),
+                             torch.rand(1).item() < p_verbosity.item()])
 
         for k, v in token.items():
             token[k] = v.to(device)
+            #print(k, token[k])
 
         with torch.no_grad():
             p = []
@@ -102,6 +115,7 @@ for epoch in range(5): # epochs
                 reward_model.index = k
                 output = reward_model(**token)
                 p.append(output["probability"])
+                #print(p)
             base_probs = torch.stack(p, dim=1) # bs, inds=10
             w = torch.softmax(reward_model.weight, dim=0) # inds
             base_prob = torch.matmul(base_probs, w) # bs
@@ -109,7 +123,7 @@ for epoch in range(5): # epochs
         p = torch.matmul(base_probs, torch.softmax(reward_model.weight, dim=0))
         loss = 0.
         flag_list = []
-        for k in range(len(sentence_input_0)):
+        for k in range(batch // 2):
             if torch.rand(1) < ratio:
                 flag = win_flag[k][0]
             else:
@@ -122,10 +136,15 @@ for epoch in range(5): # epochs
                 loss += - torch.log(1 - p[k])
                 flag_list.append(1.)
         loss = loss / (batch // 2)
-        #wandb.log({
-        #    'loss': loss.item(),
-        #})
+        
+        wandb.log({
+            'loss': loss.item(),
+        })
+        
+        #print('here! : ', loss, loss.dtype, loss.device)
         loss.backward()
+        t = reward_model.weight.grad
+        #print(t, t.dtype, t.device)
         optimizer.step()
         optimizer.zero_grad()
         flag_list = torch.tensor(flag_list).to(device)
@@ -136,6 +155,7 @@ for epoch in range(5): # epochs
             output = reward_model(**token)
             p = output["probability"]
             loss = torch.mean(w[k] * p / (flag_list - base_prob))
+            #print('here ' + str(k) + ' : ', loss.dtype)
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
@@ -145,4 +165,4 @@ for epoch in range(5): # epochs
 end_time = time.time()
 print('time:', end_time - start_time)
 
-#wandb.finish()
+wandb.finish()
