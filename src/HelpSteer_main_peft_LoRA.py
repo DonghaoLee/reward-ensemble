@@ -3,6 +3,10 @@ import time
 import torch
 import torch.nn as nn
 import numpy as np
+from torch.cuda.amp import GradScaler, autocast
+
+
+
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification, BitsAndBytesConfig
 from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
 from datasets import load_dataset
@@ -14,10 +18,10 @@ from utils import HelpSteer_pair_generate
 
 inds = 10
 # set device
-device = 'cuda:1'
-device_map = {
-    '': device,
-}
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+# device_map = {
+#     '': device,
+# }
 nf4_config = BitsAndBytesConfig(
    load_in_4bit=True,
    bnb_4bit_quant_type="nf4",
@@ -25,17 +29,20 @@ nf4_config = BitsAndBytesConfig(
    bnb_4bit_compute_dtype=torch.bfloat16
 )
 
-tokenizer = AutoTokenizer.from_pretrained('mistralai/Mistral-7B-v0.1')
+pretrained_model_path = "../HF_checkpoint/Mistral-7B-Instruct-v0.2"
+
+tokenizer = AutoTokenizer.from_pretrained(pretrained_model_path)
 tokenizer.padding_side = 'right'
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.add_eos_token = True
 
 model = AutoModel.from_pretrained(
-    'mistralai/Mistral-7B-v0.1',
+    pretrained_model_path,
     quantization_config=nf4_config,
-    device_map = device_map,
+    device_map = "auto",
     torch_dtype = torch.bfloat16
 )
+scaler = GradScaler()
 model = prepare_model_for_kbit_training(model)
 
 config = LoraConfig(
@@ -62,6 +69,8 @@ optimizer = torch.optim.Adam(reward_model.parameters(), lr = 0.00001, betas=(0.9
 start_time = time.time()
 batch = 1
 ratio = 0.5
+
+wandb.init(project='HelpSteer', name='HelpSteer_mix_0.5')
 
 # test save
 for epoch in range(5): # epochs
@@ -118,24 +127,29 @@ for epoch in range(5): # epochs
         p = torch.matmul(base_probs, torch.softmax(reward_model.weight, dim=0))
         loss = 0.
         flag_list = []
-        for k in range(len(sentence_input_0)):
-            if torch.rand(1) < ratio:
-                flag = win_flag[k][0]
-            else:
-                flag = win_flag[k][1]
-
-            if flag:
-                loss += - torch.log(p[k])
-                flag_list.append(0.)
-            else:
-                loss += - torch.log(1 - p[k])
-                flag_list.append(1.)
-        loss = loss / batch
+        with autocast():
+            for k in range(len(sentence_input_0)):
+                if torch.rand(1) < ratio:
+                    flag = win_flag[k][0]
+                else:
+                    flag = win_flag[k][1]
+                if flag:
+                    loss += - torch.log(p[k])
+                    flag_list.append(0.)
+                else:
+                    loss += - torch.log(1 - p[k])
+                    flag_list.append(1.)
+            loss = loss / batch
         wandb.log({
             'loss': loss.item(),
         })
-        loss.backward()
-        optimizer.step()
+        # Scale the loss and call backward()
+        scaler.scale(loss).backward()
+        # Step with the optimizer
+        scaler.step(optimizer)
+        # Update the scaler
+        scaler.update()
+        # Clear gradients
         optimizer.zero_grad()
         flag_list = torch.tensor(flag_list).to(device)
 
