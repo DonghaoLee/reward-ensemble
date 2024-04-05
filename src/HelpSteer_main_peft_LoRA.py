@@ -10,12 +10,12 @@ from datasets import load_dataset
 import wandb
 
 from model import RewardModel
-from utils import HelpSteer_pair_generate
+from utils import HelpSteer_pair_generate, force_adapter
 
-inds = 10
+inds = 2
 torch.set_default_dtype(torch.float16)
 # set device
-device = 'cuda:1'
+device = 'cuda:2'
 device_map = {
     '': device,
 }
@@ -23,12 +23,12 @@ nf4_config = BitsAndBytesConfig(
    load_in_4bit=True,
    bnb_4bit_quant_type="nf4",
    bnb_4bit_use_double_quant=True,
-   bnb_4bit_compute_dtype=torch.bfloat16
+   bnb_4bit_compute_dtype=torch.float16
 )
-wandb.init(
-    project = 'mix reward model with LoRA',
-    name = ''
-)
+#wandb.init(
+#    project = 'mix reward model with LoRA',
+#    name = ''
+#)
 
 tokenizer = AutoTokenizer.from_pretrained('mistralai/Mistral-7B-v0.1')
 tokenizer.padding_side = 'right'
@@ -37,9 +37,8 @@ tokenizer.add_eos_token = True
 
 model = AutoModel.from_pretrained(
     'mistralai/Mistral-7B-v0.1',
-    quantization_config=nf4_config,
+    quantization_config = nf4_config,
     device_map = device_map,
-    torch_dtype = torch.bfloat16
 )
 model = prepare_model_for_kbit_training(model)
 
@@ -54,10 +53,10 @@ config = LoraConfig(
 
 for ind in range(inds):
     model.add_adapter(config, 'adapter_' + str(ind))
-model.set_adapter('adapter_0')
+model.set_adapter(['adapter_' + str(ind) for ind in range(inds)])
 reward_model = RewardModel(tokenizer, model, inds = inds, device = device)
-#for n, p in reward_model.named_parameters():
-#    print(n, p.dtype, p.requires_grad, p.device)
+for n, p in reward_model.named_parameters():
+    print(n, p.dtype, p.requires_grad, p.device)
 
 dataset = load_dataset('nvidia/HelpSteer', split="train")
 first_indices, pair_map = HelpSteer_pair_generate()
@@ -83,8 +82,8 @@ for epoch in range(5): # epochs
                           padding = True,
                           truncation = True,
                           return_tensors = 'pt',
-                          max_length=1024)
-            if torch.sum(token['attention_mask']) > 1000:
+                          max_length=500) # 1024
+            if torch.sum(token['attention_mask']) > 400: # 1000
                 continue
             response_0 = dataset['response'][temp_inds[k]]
             helpfulness_0 = dataset['helpfulness'][temp_inds[k]]
@@ -104,15 +103,16 @@ for epoch in range(5): # epochs
                           padding = True,
                           truncation = True,
                           return_tensors = 'pt',
-                          max_length=1024)
+                          max_length=500) #
         #print(i, torch.sum(token['attention_mask'], dim=-1))
         for k, v in token.items():
             token[k] = v.to(device)
+            print(k, token[k].device, token[k].dtype)
 
         with torch.no_grad():
             p = []
             for k in range(inds):
-                reward_model.rwtransformer.set_adapter('adapter_' + str(k))
+                force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
                 reward_model.index = k
                 output = reward_model(**token)
                 p.append(output["probability"])
@@ -136,6 +136,7 @@ for epoch in range(5): # epochs
                 loss += - torch.log(1 - p[k])
                 flag_list.append(1.)
         loss = loss / batch
+        print(loss)
         #wandb.log({
         #    'loss': loss.item(),
         #})
@@ -145,7 +146,7 @@ for epoch in range(5): # epochs
         flag_list = torch.tensor(flag_list).to(device)
 
         for k in range(inds):
-            reward_model.rwtransformer.set_adapter('adapter_' + str(k))
+            force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
             reward_model.index = k
             output = reward_model(**token)
             p = output["probability"]

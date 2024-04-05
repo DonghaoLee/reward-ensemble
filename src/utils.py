@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from lora import LinearLayer_LoRA
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-
+from peft.tuners.tuners_utils import BaseTunerLayer
 
 def evaluate(model, tokenizer, dataset, device, batch = 1, inds = 10):
     sentiment_score_model = AutoModelForSequenceClassification.from_pretrained("lvwerra/distilbert-imdb")
@@ -249,3 +249,8 @@ def HelpSteer_pair_generate():
                     temp_group.append(t)
             pair_map[x] = temp_group[np.random.randint(len(temp_group))]
     return np.array(first_responses_indices), np.array(pair_map)
+
+def force_adapter(model, adapter_names = ['']):
+    for n, m in model.named_modules():
+        if isinstance(m, BaseTunerLayer):
+            m._active_adapter = adapter_names

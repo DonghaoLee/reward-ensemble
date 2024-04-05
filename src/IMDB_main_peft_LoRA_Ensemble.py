@@ -3,13 +3,24 @@ import time
 import torch
 import torch.nn as nn
 import numpy as np
-from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification, BitsAndBytesConfig
-from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
+from transformers import (
+    AutoTokenizer, 
+    AutoModel, 
+    AutoModelForSequenceClassification, 
+    BitsAndBytesConfig
+)
+from peft import (
+    prepare_model_for_kbit_training, 
+    LoraConfig, 
+    get_peft_model
+)
+from peft.tuners.tuners_utils import BaseTunerLayer
 from datasets import load_dataset
 
 import wandb
 
 from model import RewardModel
+from utils import force_adapter
 
 inds = 10
 #torch.set_default_dtype(torch.float16)
@@ -49,17 +60,17 @@ model = AutoModel.from_pretrained(
 )
 
 config = LoraConfig(
-    r=16, 
-    lora_alpha=16, 
+    r=32, 
+    lora_alpha=1, 
     target_modules=['k_proj', 'q_proj', 'v_proj', 'out_proj', "fc1", "fc2"], 
-    lora_dropout=0.05, 
+    lora_dropout=0.00, 
     bias="none", 
     task_type="CAUSAL_LM"
 )
 
 for ind in range(inds):
     model.add_adapter(config, 'adapter_' + str(ind))
-model.set_adapter('adapter_0')
+model.set_adapter(['adapter_' + str(ind) for ind in range(inds)])
 reward_model = RewardModel(
     tokenizer, 
     model, 
@@ -67,8 +78,10 @@ reward_model = RewardModel(
     device = device, 
     num_padding_at_beginning=1
 )
+#print('reward model')
 #for n, p in reward_model.named_parameters():
 #    print(n, p.dtype, p.requires_grad, p.device)
+#print()
 
 dataset = load_dataset('imdb', split="train")
 
@@ -79,8 +92,9 @@ batch = 10
 ratio = 0.5
 
 for epoch in range(5): # epochs
-    dataset.shuffle()
+    dataset = dataset.shuffle()
     for i in range(len(dataset['text']) // batch):
+        #print(10 * '-' + 'i = ' + str(i) + 10 * '-')
         win_flag = []
         
         prompt = dataset['text'][i * batch : (i + 1) * batch]
@@ -111,11 +125,11 @@ for epoch in range(5): # epochs
         with torch.no_grad():
             p = []
             for k in range(inds):
-                reward_model.rwtransformer.set_adapter('adapter_' + str(k))
+                force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
                 reward_model.index = k
                 output = reward_model(**token)
                 p.append(output["probability"])
-                #print(p)
+                #print('adapter' + str(k), output["probability"])
             base_probs = torch.stack(p, dim=1) # bs, inds=10
             w = torch.softmax(reward_model.weight, dim=0) # inds
             base_prob = torch.matmul(base_probs, w) # bs
@@ -143,23 +157,33 @@ for epoch in range(5): # epochs
         
         #print('here! : ', loss, loss.dtype, loss.device)
         loss.backward()
-        t = reward_model.weight.grad
+        #t = reward_model.weight.grad
         #print(t, t.dtype, t.device)
-        optimizer.step()
-        optimizer.zero_grad()
+        #optimizer.step()
+        #optimizer.zero_grad()
         flag_list = torch.tensor(flag_list).to(device)
 
         for k in range(inds):
-            reward_model.rwtransformer.set_adapter('adapter_' + str(k))
+            #reward_model.rwtransformer.set_adapter('adapter_' + str(k))
+            force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
             reward_model.index = k
             output = reward_model(**token)
             p = output["probability"]
             loss = torch.mean(w[k] * p / (flag_list - base_prob))
             #print('here ' + str(k) + ' : ', loss.dtype)
             loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
 
+        #print('reward model')
+        #for n, p in reward_model.named_parameters():
+        #    if (n == 'rwtransformer.decoder.layers.0.self_attn.v_proj.lora_A.adapter_0.weight' or
+        #        n == 'rwtransformer.decoder.layers.0.self_attn.v_proj.lora_B.adapter_0.weight' or
+        #        n == 'rwtransformer.decoder.layers.0.self_attn.v_proj.lora_A.adapter_1.weight' or
+        #        n == 'rwtransformer.decoder.layers.0.self_attn.v_proj.lora_B.adapter_1.weight'):
+        #        print(n, p.grad)
+        #print()
+
+        optimizer.step()
+        optimizer.zero_grad()
     torch.save(reward_model.state_dict(), 'ckpt/IMDB_LoRA_Ensemble_0.5_epoch_' + str(epoch) + '.ckpt')
 
 end_time = time.time()
