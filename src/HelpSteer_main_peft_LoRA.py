@@ -12,8 +12,9 @@ import wandb
 from model import RewardModel
 from utils import HelpSteer_pair_generate, force_adapter
 
-inds = 2
-torch.set_default_dtype(torch.float16)
+inds = 10
+# torch.set_default_dtype(torch.float16)
+
 # set device
 device = 'cuda:2'
 device_map = {
@@ -55,8 +56,9 @@ for ind in range(inds):
     model.add_adapter(config, 'adapter_' + str(ind))
 model.set_adapter(['adapter_' + str(ind) for ind in range(inds)])
 reward_model = RewardModel(tokenizer, model, inds = inds, device = device)
-for n, p in reward_model.named_parameters():
-    print(n, p.dtype, p.requires_grad, p.device)
+# check the parameters if necessary
+#for n, p in reward_model.named_parameters():
+#    print(n, p.dtype, p.requires_grad, p.device)
 
 dataset = load_dataset('nvidia/HelpSteer', split="train")
 first_indices, pair_map = HelpSteer_pair_generate()
@@ -82,8 +84,8 @@ for epoch in range(5): # epochs
                           padding = True,
                           truncation = True,
                           return_tensors = 'pt',
-                          max_length=500) # 1024
-            if torch.sum(token['attention_mask']) > 400: # 1000
+                          max_length=1024) # 1024
+            if torch.sum(token['attention_mask']) > 1000: # 1000
                 continue
             response_0 = dataset['response'][temp_inds[k]]
             helpfulness_0 = dataset['helpfulness'][temp_inds[k]]
@@ -93,8 +95,8 @@ for epoch in range(5): # epochs
             verbosity_1 = dataset['verbosity'][temp_pairs[k]]
             sentence_input_0.append(prompt + response_0)
             sentence_input_1.append(prompt + response_1)
-            p_helpfulness = torch.sigmoid(torch.tensor(helpfulness_0 - helpfulness_1))
-            p_verbosity = torch.sigmoid(torch.tensor(verbosity_0 - verbosity_1))
+            p_helpfulness = torch.sigmoid(10 * torch.tensor(helpfulness_0 - helpfulness_1))
+            p_verbosity = torch.sigmoid(10 * torch.tensor(verbosity_0 - verbosity_1))
             win_flag.append([torch.rand(1).item() < p_helpfulness, torch.rand(1).item() < p_verbosity])
 
         if len(sentence_input_0) == 0:
@@ -103,7 +105,7 @@ for epoch in range(5): # epochs
                           padding = True,
                           truncation = True,
                           return_tensors = 'pt',
-                          max_length=500) #
+                          max_length=1024) 
         #print(i, torch.sum(token['attention_mask'], dim=-1))
         for k, v in token.items():
             token[k] = v.to(device)
@@ -136,13 +138,10 @@ for epoch in range(5): # epochs
                 loss += - torch.log(1 - p[k])
                 flag_list.append(1.)
         loss = loss / batch
-        print(loss)
         #wandb.log({
         #    'loss': loss.item(),
         #})
         loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
         flag_list = torch.tensor(flag_list).to(device)
 
         for k in range(inds):
@@ -152,8 +151,9 @@ for epoch in range(5): # epochs
             p = output["probability"]
             loss = torch.mean(w[k] * p / (flag_list - base_prob))
             loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+
+        optimizer.step()
+        optimizer.zero_grad()
 
     torch.save(reward_model.state_dict(), 'ckpt/HelpSteer_mix_0.5_epoch_' + str(epoch) + '.ckpt')
 
