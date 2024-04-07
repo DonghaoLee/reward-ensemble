@@ -137,7 +137,7 @@ for epoch in range(5): # epochs
             else:
                 loss += - torch.log(1 - p[k])
                 flag_list.append(1.)
-        loss = loss / batch
+        loss = loss / len(sentence_input_0)
         #wandb.log({
         #    'loss': loss.item(),
         #})
