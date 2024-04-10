@@ -231,6 +231,7 @@ class RewardModel(nn.Module):
         # Compute pairwise loss. Only backprop on the different tokens before padding
         loss = 0.
         p_list = []
+        chosen_scores_bs = []
         for i in range(bs):
             chosen_id = chosen_ids[i]
             rejected_id = rejected_ids[i]
@@ -256,7 +257,9 @@ class RewardModel(nn.Module):
                 divergence_ind = check_divergence[0]
             assert divergence_ind > 0
             c_truncated_reward = chosen_reward[divergence_ind:end_ind]
+            chosen_scores_bs.append(c_truncated_reward)
             r_truncated_reward = rejected_reward[divergence_ind:end_ind]
+            rejected_scores_bs.append(c_rejected_reward)
             chosen_mean_scores.append(
                 chosen_reward[c_ind - 1])  #use the end score for reference
             rejected_mean_scores.append(rejected_reward[r_ind - 1])
@@ -273,8 +276,8 @@ class RewardModel(nn.Module):
         return {
             "loss": loss,
             "probability": p,
-            "chosen_mean_scores": chosen_mean_scores,
-            "rejected_mean_scores": rejected_mean_scores,
+            "chosen_scores": chosen_scores_bs,
+            "rejected_scores": rejected_scores_bs,
         }
 
     def forward_value(self,
@@ -316,14 +319,14 @@ class RewardModel(nn.Module):
             for i in range(bs):
                 input_id = input_ids[i]
                 value = values[i]
-
+                divergence_ind = prompt_length + self.num_padding_at_beginning
                 c_inds = (input_id[prompt_length:] == self.PAD_ID).nonzero()
                 # here we only use the answer part of the sequence so we do not need to care about the padding at the beginning
                 c_ind = c_inds[0].item() + prompt_length if len(
                     c_inds) > 0 else seq_len
                 chosen_end_scores.append(value[c_ind - 1])
 
-                p = torch.exp(torch.nn.functional.logsigmoid(value[:c_ind]).mean())
+                p = torch.exp(torch.nn.functional.logsigmoid(value[divergence_ind:c_ind]).mean())
                 p_list.append(p)
             p = torch.stack(p_list)
             return {
