@@ -4,19 +4,22 @@ import os
 
 import torch
 import torch.nn as nn
+from torch.cuda.amp import GradScaler, autocast
 import numpy as np
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification, BitsAndBytesConfig
 from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
 from datasets import load_dataset
 import bitsandbytes as bnb
+import gc
+from peft.tuners.tuners_utils import BaseTunerLayer
 
 import wandb
 
 from model import RewardModel
 from utils import HelpSteer_pair_generate, force_adapter
 
-inds = 2
-# torch.set_default_dtype(torch.float16)
+inds = 1
+#torch.set_default_dtype(torch.float16)
 
 # set device
 def print_gpu_memory():
@@ -45,8 +48,9 @@ model = AutoModel.from_pretrained(
     'mistralai/Mistral-7B-v0.1',
     quantization_config = nf4_config,
     device_map = device_map,
+    torch_dtype = torch.float16
 )
-model = prepare_model_for_kbit_training(model)
+#model = prepare_model_for_kbit_training(model)
 
 config = LoraConfig(
     r=16, 
@@ -60,27 +64,44 @@ config = LoraConfig(
 for ind in range(inds):
     model.add_adapter(config, 'adapter_' + str(ind))
 model.set_adapter(['adapter_' + str(ind) for ind in range(inds)])
+model.gradient_checkpointing_enable()
+for n, m in model.named_modules():
+    if isinstance(m, BaseTunerLayer):
+        m = m.half()
 reward_model = RewardModel(tokenizer, model, inds = inds, device = device)
 # check the parameters if necessary
-#for n, p in reward_model.named_parameters():
-#    print(n, p.dtype, p.requires_grad, p.device)
+for n, p in reward_model.named_parameters():
+    print(n, p.dtype, p.requires_grad, p.device)
 
 dataset = load_dataset('nvidia/HelpSteer', split="train")
 first_indices, pair_map = HelpSteer_pair_generate()
 
 print_gpu_memory()
 
-optimizer = bnb.optim.Adam8bit(reward_model.parameters(), lr = 0.00001, betas=(0.9, 0.95))
+params = []
+for n,p in reward_model.named_parameters():
+    if n != 'weight':
+        params.append(p)
+optimizer_1 = bnb.optim.PagedAdam8bit(
+    params, 
+    lr = 0.00001, 
+    betas=(0.9, 0.95)
+)
+optimizer_2 = torch.optim.Adam([reward_model.weight], lr = 0.00001, betas=(0.9, 0.95))
 #optimizer = torch.optim.Adam(reward_model.parameters(), lr = 0.00001, betas=(0.9, 0.95))
+scaler = GradScaler()
 
 start_time = time.time()
 batch = 1
 ratio = 0.5
 
-# test save
+np.random.seed(42)
+np.random.shuffle(first_indices)
+
 for epoch in range(5): # epochs
-    np.random.shuffle(first_indices)
     for i in range(len(first_indices) // batch):
+        optimizer_1.zero_grad()
+        optimizer_2.zero_grad()
         temp_inds = first_indices[i * batch : (i + 1) * batch]
         temp_pairs = pair_map[temp_inds]
         sentence_input_0 = []
@@ -123,19 +144,20 @@ for epoch in range(5): # epochs
 
         print_gpu_memory()
 
-        with torch.no_grad():
-            p = []
-            for k in range(inds):
-                force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
-                reward_model.index = k
-                output = reward_model(**token)
-                p.append(output["probability"])
-            base_probs = torch.stack(p, dim=1) # bs, inds=10
-            w = torch.softmax(reward_model.weight, dim=0) # inds
-            base_prob = torch.matmul(base_probs, w) # bs
-        
-        print_gpu_memory()
-
+        with autocast():
+            with torch.no_grad():
+                p = []
+                for k in range(inds):
+                    force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
+                    reward_model.index = k
+                    output = reward_model(**token)
+                    p.append(output["probability"])
+                base_probs = torch.stack(p, dim=1) # bs, inds=10
+                w = torch.softmax(reward_model.weight, dim=0) # inds
+                base_prob = torch.matmul(base_probs, w) # bs
+            
+                print_gpu_memory()
+        base_prob = base_prob.float()
         p = torch.matmul(base_probs, torch.softmax(reward_model.weight, dim=0))
         loss = 0.
         flag_list = []
@@ -156,23 +178,31 @@ for epoch in range(5): # epochs
         #    'loss': loss.item(),
         #})
         loss.backward()
+        optimizer_2.step()
+
+        #scaler.scale(loss).backward()
         flag_list = torch.tensor(flag_list).to(device)
 
         for k in range(inds):
             print(k)
             force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
             reward_model.index = k
-            output = reward_model(**token)
+            with autocast():
+                output = reward_model(**token)
+                p = output["probability"]
+                print(p.dtype)
+                loss = torch.mean(w[k] * p / (flag_list - base_prob))
             print_gpu_memory()
-            p = output["probability"]
-            loss = torch.mean(w[k] * p / (flag_list - base_prob))
+            #scaler.scale(loss).backward()
             loss.backward()
 
-        optimizer.step()
-        optimizer.zero_grad()
+        optimizer_1.step()
+        #scaler.step(optimizer_1)
+        #scaler.update()
 
         del loss, token, p, flag_list
         torch.cuda.empty_cache()
+        gc.collect()
     
     break
 
