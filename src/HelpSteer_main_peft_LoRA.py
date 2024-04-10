@@ -1,21 +1,26 @@
 import time
 
+import os
+
 import torch
 import torch.nn as nn
 import numpy as np
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification, BitsAndBytesConfig
 from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
 from datasets import load_dataset
+import bitsandbytes as bnb
 
 import wandb
 
 from model import RewardModel
 from utils import HelpSteer_pair_generate, force_adapter
 
-inds = 10
+inds = 2
 # torch.set_default_dtype(torch.float16)
 
 # set device
+def print_gpu_memory():
+    os.system('nvidia-smi --query-gpu=memory.used --format=csv -i 2 | tail -1')
 device = 'cuda:2'
 device_map = {
     '': device,
@@ -63,7 +68,10 @@ reward_model = RewardModel(tokenizer, model, inds = inds, device = device)
 dataset = load_dataset('nvidia/HelpSteer', split="train")
 first_indices, pair_map = HelpSteer_pair_generate()
 
-optimizer = torch.optim.Adam(reward_model.parameters(), lr = 0.00001, betas=(0.9, 0.95))
+print_gpu_memory()
+
+optimizer = bnb.optim.Adam8bit(reward_model.parameters(), lr = 0.00001, betas=(0.9, 0.95))
+#optimizer = torch.optim.Adam(reward_model.parameters(), lr = 0.00001, betas=(0.9, 0.95))
 
 start_time = time.time()
 batch = 1
@@ -84,8 +92,8 @@ for epoch in range(5): # epochs
                           padding = True,
                           truncation = True,
                           return_tensors = 'pt',
-                          max_length=1024) # 1024
-            if torch.sum(token['attention_mask']) > 1000: # 1000
+                          max_length=512) # 1024
+            if torch.sum(token['attention_mask']) > 500: # 1000
                 continue
             response_0 = dataset['response'][temp_inds[k]]
             helpfulness_0 = dataset['helpfulness'][temp_inds[k]]
@@ -105,11 +113,15 @@ for epoch in range(5): # epochs
                           padding = True,
                           truncation = True,
                           return_tensors = 'pt',
-                          max_length=1024) 
-        #print(i, torch.sum(token['attention_mask'], dim=-1))
+                          max_length=512) 
+
+        print(i, torch.sum(token['attention_mask'], dim=-1))
+
         for k, v in token.items():
             token[k] = v.to(device)
             print(k, token[k].device, token[k].dtype)
+
+        print_gpu_memory()
 
         with torch.no_grad():
             p = []
@@ -121,6 +133,8 @@ for epoch in range(5): # epochs
             base_probs = torch.stack(p, dim=1) # bs, inds=10
             w = torch.softmax(reward_model.weight, dim=0) # inds
             base_prob = torch.matmul(base_probs, w) # bs
+        
+        print_gpu_memory()
 
         p = torch.matmul(base_probs, torch.softmax(reward_model.weight, dim=0))
         loss = 0.
@@ -145,15 +159,22 @@ for epoch in range(5): # epochs
         flag_list = torch.tensor(flag_list).to(device)
 
         for k in range(inds):
+            print(k)
             force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
             reward_model.index = k
             output = reward_model(**token)
+            print_gpu_memory()
             p = output["probability"]
             loss = torch.mean(w[k] * p / (flag_list - base_prob))
             loss.backward()
 
         optimizer.step()
         optimizer.zero_grad()
+
+        del loss, token, p, flag_list
+        torch.cuda.empty_cache()
+    
+    break
 
     torch.save(reward_model.state_dict(), 'ckpt/HelpSteer_mix_0.5_epoch_' + str(epoch) + '.ckpt')
 
