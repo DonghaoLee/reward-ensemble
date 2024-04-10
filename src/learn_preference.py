@@ -25,14 +25,14 @@ from utils import force_adapter
 inds = 10
 #torch.set_default_dtype(torch.float16)
 # set device
-device = 'cuda:0'
+device = 'cuda:1'
 device_map = {
     '': device,
 }
 
 wandb.init(
     project = 'preference learning',
-    name = 'from 0.5_epoch_4 learn (1, 0)'
+    name = 'from 0.5_epoch_4 learn (0.92, 0.38)'
 )
 
 sentiment_score_tokenizer = AutoTokenizer.from_pretrained("lvwerra/distilbert-imdb")
@@ -80,10 +80,10 @@ reward_model = RewardModel(
 )
 
 reward_model.load_state_dict(torch.load("./ckpt/IMDB_LoRA_Ensemble_0.5_epoch_4.ckpt", map_location=device_map))
-#print('reward model')
-#for n, p in reward_model.named_parameters():
-#    print(n, p.dtype, p.requires_grad, p.device)
-#print()
+print('reward model')
+for n, p in reward_model.named_parameters():
+    print(n, p.dtype, p.requires_grad, p.device)
+print()
 
 o_dataset = load_dataset('imdb', split="train")
 len_dataset = o_dataset.num_rows
@@ -97,7 +97,7 @@ start_time = time.time()
 batch = 40
 
 dataset = o_dataset.shuffle().select(range(200))
-preference = [0, 1]
+preference = [np.cos(np.pi/8), np.sin(np.pi/8)]
 
 for epoch in range(40): # 2 epochs
     # It will be a better idea to use DatasetLoader in Pytorch to load the data
@@ -165,7 +165,7 @@ for epoch in range(40): # 2 epochs
     })
 
     # torch.save(reward_model.state_dict(), 'ckpt/mix_reward_model_0.5_epoch_' + str(epoch) + '.ckpt')
-    torch.save(weight, 'ckpt/reward_0.5_w_0.0_1.0_weight.out')
+    torch.save(weight, 'ckpt/reward_0.5_w_0.98_0.38_weight.out')
 
 end_time = time.time()
 print('time:', end_time - start_time)
