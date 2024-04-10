@@ -82,7 +82,7 @@ reward_model = RewardModel(
 #for n, p in reward_model.named_parameters():
 #    print(n, p.dtype, p.requires_grad, p.device)
 #print()
-reward_model.load_state_dict(torch.load("./ckpt/IMDB_LoRA_Ensemble_0.5_epoch_4.ckpt", map_location=device_map))
+reward_model.load_state_dict(torch.load("./ckpt/IMDB_LoRA_Ensemble_0.5_epoch_4.ckpt", map_location=device))
 
 o_dataset = load_dataset('imdb', split="train")
 len_dataset = o_dataset.num_rows

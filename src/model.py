@@ -232,6 +232,7 @@ class RewardModel(nn.Module):
         loss = 0.
         p_list = []
         chosen_scores_bs = []
+        rejected_scores_bs = []
         for i in range(bs):
             chosen_id = chosen_ids[i]
             rejected_id = rejected_ids[i]
@@ -259,7 +260,7 @@ class RewardModel(nn.Module):
             c_truncated_reward = chosen_reward[divergence_ind:end_ind]
             chosen_scores_bs.append(c_truncated_reward)
             r_truncated_reward = rejected_reward[divergence_ind:end_ind]
-            rejected_scores_bs.append(c_rejected_reward)
+            rejected_scores_bs.append(r_truncated_reward)
             chosen_mean_scores.append(
                 chosen_reward[c_ind - 1])  #use the end score for reference
             rejected_mean_scores.append(rejected_reward[r_ind - 1])
