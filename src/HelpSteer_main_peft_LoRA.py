@@ -18,12 +18,13 @@ import wandb
 from model import RewardModel
 from utils import HelpSteer_pair_generate, force_adapter
 
-inds = 1
+inds = 10
 #torch.set_default_dtype(torch.float16)
 
 # set device
-def print_gpu_memory():
-    os.system('nvidia-smi --query-gpu=memory.used --format=csv -i 2 | tail -1')
+def print_gpu_memory(flag=True):
+    if flag:
+        os.system('nvidia-smi --query-gpu=memory.used --format=csv -i 2 | tail -1')
 device = 'cuda:2'
 device_map = {
     '': device,
@@ -69,9 +70,10 @@ for n, m in model.named_modules():
     if isinstance(m, BaseTunerLayer):
         m = m.half()
 reward_model = RewardModel(tokenizer, model, inds = inds, device = device)
+reward_model.v_head = reward_model.v_head.half()
 # check the parameters if necessary
-for n, p in reward_model.named_parameters():
-    print(n, p.dtype, p.requires_grad, p.device)
+#for n, p in reward_model.named_parameters():
+#    print(n, p.dtype, p.requires_grad, p.device)
 
 dataset = load_dataset('nvidia/HelpSteer', split="train")
 first_indices, pair_map = HelpSteer_pair_generate()
@@ -190,7 +192,7 @@ for epoch in range(5): # epochs
             with autocast():
                 output = reward_model(**token)
                 p = output["probability"]
-                print(p.dtype)
+                #print(p.dtype)
                 loss = torch.mean(w[k] * p / (flag_list - base_prob))
             print_gpu_memory()
             #scaler.scale(loss).backward()
@@ -203,8 +205,12 @@ for epoch in range(5): # epochs
         del loss, token, p, flag_list
         torch.cuda.empty_cache()
         gc.collect()
-    
-    break
+
+        #for n, p in reward_model.named_parameters():
+        #    if p.requires_grad:
+        #        print(n, p.requires_grad, p.dtype, p.grad.dtype)
+        #    else:
+        #        print(n, p.requires_grad, p.dtype, type(p.grad))
 
     torch.save(reward_model.state_dict(), 'ckpt/HelpSteer_mix_0.5_epoch_' + str(epoch) + '.ckpt')
 
