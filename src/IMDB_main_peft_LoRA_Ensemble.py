@@ -22,17 +22,17 @@ import wandb
 from model import RewardModel
 from utils import force_adapter
 
-inds = 10
+inds = 1
 #torch.set_default_dtype(torch.float16)
 # set device
-device = 'cuda:1'
+device = 'cuda:0'
 device_map = {
     '': device,
 }
 
 wandb.init(
     project = 'ensemble reward model with LoRA',
-    name = 'training LoRA ensemble - IMDB - uni'
+    name = 'training LoRA - IMDB - 0.5'
 )
 
 sentiment_score_tokenizer = AutoTokenizer.from_pretrained("lvwerra/distilbert-imdb")
@@ -82,7 +82,7 @@ reward_model = RewardModel(
 #for n, p in reward_model.named_parameters():
 #    print(n, p.dtype, p.requires_grad, p.device)
 #print()
-reward_model.load_state_dict(torch.load("./ckpt/IMDB_LoRA_Ensemble_0.5_epoch_4.ckpt", map_location=device))
+#reward_model.load_state_dict(torch.load("./ckpt/IMDB_LoRA_Ensemble_0.5_epoch_4.ckpt", map_location=device))
 
 o_dataset = load_dataset('imdb', split="train")
 len_dataset = o_dataset.num_rows
@@ -95,7 +95,7 @@ optimizer = torch.optim.Adam(reward_model.parameters(), lr = 0.00001, betas=(0.9
 start_time = time.time()
 batch = 10
 
-for epoch in range(5, 10): # epochs
+for epoch in range(5): # epochs
     original_indices = np.arange(len_dataset)
     np.random.shuffle(original_indices)
     preferences_shuffled = preferences[torch.tensor(original_indices)]
@@ -175,7 +175,7 @@ for epoch in range(5, 10): # epochs
             loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-    torch.save(reward_model.state_dict(), 'ckpt/IMDB_LoRA_Ensemble_0.5_epoch_' + str(epoch) + '_uni.ckpt')
+    torch.save(reward_model.state_dict(), 'ckpt/IMDB_LoRA_epoch_' + str(epoch) + '.ckpt')
 
 end_time = time.time()
 print('time:', end_time - start_time)
