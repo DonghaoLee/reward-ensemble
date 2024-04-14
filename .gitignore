@@ -1,3 +1,5 @@
+*.pt
+!preferences/preference_d2_0.pt
 *.ckpt
 *.out
 

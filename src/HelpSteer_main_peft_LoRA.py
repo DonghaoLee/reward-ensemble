@@ -212,7 +212,7 @@ for epoch in range(5): # epochs
         #    else:
         #        print(n, p.requires_grad, p.dtype, type(p.grad))
 
-    torch.save(reward_model.state_dict(), 'ckpt/HelpSteer_mix_0.5_epoch_' + str(epoch) + '.ckpt')
+    reward_model.save_pretrained('ckpt/HelpSteer_mix_0.5_epoch_' + str(epoch))
 
 end_time = time.time()
 print('time:', end_time - start_time)

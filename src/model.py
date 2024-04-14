@@ -1,6 +1,7 @@
+from pathlib import Path
+
 import torch
 import torch.nn as nn
-
 
 # Modified from the project 'trl' and 'DeepSpeed-Chat'
 class RewardModel1(nn.Module):
@@ -168,6 +169,7 @@ class RewardModel(nn.Module):
         self.num_padding_at_beginning = num_padding_at_beginning
         self.inds = inds
         self.index = 0
+        self.device = device
         if hasattr(self.config, "word_embed_proj_dim"):
             # `OPT` models use word_embed_proj_dim as final output
             # https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py#L497
@@ -189,6 +191,31 @@ class RewardModel(nn.Module):
 
     def gradient_checkpointing_disable(self):
         self.rwtransformer.gradient_checkpointing_disable()
+
+    def save_pretrained(self, folder):
+        if folder[-1] != '/':
+            folder = folder + '/'
+        directory = Path(folder)
+        directory.mkdir(parents=True, exist_ok=True)
+        torch.save({
+            'weight': self.weight,
+            'v_head': self.v_head.state_dict(),
+        }, folder + 'weight_and_vhead.pt')
+        for i in range(self.inds):
+            self.rwtransformer.set_adapter('adapter_' + str(i))
+            self.rwtransformer.save_pretrained(folder + 'adapter_' + str(i) + '.ckpt')
+        self.rwtransformer.set_adapter(['adapter_' + str(i) for i in range(self.inds)])
+    
+    def load_pretrained(self, folder):
+        if folder[-1] != '/':
+            folder = folder + '/'
+        x = torch.load(folder + 'weight_and_vhead.pt')
+        self.weight = x['weight'].to(self.device)
+        self.v_head.load_state_dict(x['v_head'])
+        self.v_head = self.v_head.to(self.device)
+        for i in range(self.inds):
+            self.rwtransformer.load_adapter(folder + 'adapter_' + str(i) + '.ckpt', 'adapter_' + str(i))
+        self.rwtransformer.set_adapter(['adapter_' + str(i) for i in range(self.inds)])    
 
     def forward(self,
                 input_ids=None,
