@@ -25,14 +25,14 @@ from utils import force_adapter
 inds = 1
 #torch.set_default_dtype(torch.float16)
 # set device
-device = 'cuda:0'
+device = 'cuda:2'
 device_map = {
     '': device,
 }
 
 wandb.init(
     project = 'ensemble reward model with LoRA',
-    name = 'training LoRA - IMDB - 0.5'
+    name = 'training LoRA - IMDB - 0.5 - uni'
 )
 
 sentiment_score_tokenizer = AutoTokenizer.from_pretrained("lvwerra/distilbert-imdb")
@@ -88,7 +88,7 @@ o_dataset = load_dataset('imdb', split="train")
 len_dataset = o_dataset.num_rows
 print(len_dataset)
 preferences = torch.load('preferences/preference_d2_0.pt')
-preferences = preferences['eigen']
+preferences = preferences['uni']
 
 optimizer = torch.optim.Adam(reward_model.parameters(), lr = 0.00001, betas=(0.9, 0.95))
 
@@ -175,7 +175,7 @@ for epoch in range(5): # epochs
             loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-    torch.save(reward_model.state_dict(), 'ckpt/IMDB_LoRA_epoch_' + str(epoch) + '.ckpt')
+    torch.save(reward_model.state_dict(), 'ckpt/IMDB_LoRA_epoch_' + str(epoch) + '_uni.ckpt')
 
 end_time = time.time()
 print('time:', end_time - start_time)
