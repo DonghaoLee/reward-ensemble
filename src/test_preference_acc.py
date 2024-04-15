@@ -22,7 +22,7 @@ import wandb
 from model import RewardModel
 from utils import force_adapter
 
-inds = 10
+inds = 2
 #torch.set_default_dtype(torch.float16)
 # set device
 device = 'cuda:1'
@@ -72,19 +72,20 @@ reward_model = RewardModel(
     num_padding_at_beginning=1
 )
 
-reward_model.load_state_dict(torch.load("./ckpt/IMDB_LoRA_Ensemble_0.5_epoch_4.ckpt", map_location=device_map))
+reward_model.load_state_dict(torch.load("./ckpt/IMDB_LoRA_EM_epoch_4_uni.ckpt", map_location=device_map))
 
 o_dataset = load_dataset('imdb', split="test")
 len_dataset = o_dataset.num_rows
 
-weight = [torch.load('ckpt/reward_0.5_w_1.0_0.0_weight.out').to(device),
-          torch.load('ckpt/reward_0.5_w_0.98_0.38_weight.out').to(device),
-          torch.load('ckpt/reward_0.5_w_0.53_0.53_weight.out').to(device),
-          torch.load('ckpt/reward_0.5_w_0.38_0.98_weight.out').to(device),
-          torch.load('ckpt/reward_0.5_w_0.0_1.0_weight.out').to(device)]
+#weight = [torch.load('ckpt/reward_0.5_w_1.0_0.0_weight.out').to(device),
+#          torch.load('ckpt/reward_0.5_w_0.98_0.38_weight.out').to(device),
+#          torch.load('ckpt/reward_0.5_w_0.53_0.53_weight.out').to(device),
+#          torch.load('ckpt/reward_0.5_w_0.38_0.98_weight.out').to(device),
+#          torch.load('ckpt/reward_0.5_w_0.0_1.0_weight.out').to(device)]
+weight = torch.load('ckpt/reward_uni_weight.out')
 
 start_time = time.time()
-batch = 100
+batch = 200
 
 dataset = o_dataset.shuffle().select(range(2000))
 preferences = [[1.0, 0.0], 
@@ -148,14 +149,13 @@ for i in range(len(dataset['text']) // batch):
                     correct_count[l] += 1
         loss[l] = loss[l] / (batch // 2)
         avg_loss[l] += loss[l].item()
-avg_loss = avg_loss / 20.
+avg_loss = avg_loss / 10.
 acc = correct_count / 1000.
-    # torch.save(reward_model.state_dict(), 'ckpt/mix_reward_model_0.5_epoch_' + str(epoch) + '.ckpt')
 
 print(acc, avg_loss)
 torch.save(
     {'acc': acc, 'loss': loss, 'pref':preferences},
-    'ckpt/pref_result_reward_0.5.out'
+    'ckpt/pref_result_uni_eigen.out'
 )
 
 end_time = time.time()
