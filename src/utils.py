@@ -228,8 +228,8 @@ def uni_preference(num, d):
     x = torch.rand(size=[num])
     return torch.stack([x, 1 - x], dim=1)
 
-def HelpSteer_pair_generate():
-    index = np.load('temp/prompt_index_helpsteer.npy')
+def HelpSteer_pair_generate(index_file = 'temp/prompt_index_helpsteer.npy'):
+    index = np.load(index_file)
     l = len(index)
     p = np.max(index) + 1
     count = [0 for _ in range(p)]

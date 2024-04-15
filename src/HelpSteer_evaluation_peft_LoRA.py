@@ -18,7 +18,7 @@ import wandb
 from model import RewardModel
 from utils import HelpSteer_pair_generate, force_adapter
 
-inds = 10
+inds = 2
 #torch.set_default_dtype(torch.float16)
 
 # set device
@@ -65,148 +65,82 @@ config = LoraConfig(
 reward_model = RewardModel(tokenizer, model, inds = inds, device = device)
 reward_model.v_head = reward_model.v_head.half()
 reward_model.load_pretrained('ckpt/test_save')
-reward_model.gradient_checkpointing_enable()
-
-dataset = load_dataset('nvidia/HelpSteer', split="validation")
-first_indices, pair_map = HelpSteer_pair_generate()
-
-print_gpu_memory()
-
-params = []
-for n,p in reward_model.named_parameters():
-    if n != 'weight':
-        params.append(p)
-optimizer_1 = bnb.optim.PagedAdam8bit(
-    params, 
-    lr = 0.00001, 
-    betas=(0.9, 0.95)
-)
-optimizer_2 = torch.optim.Adam([reward_model.weight], lr = 0.00001, betas=(0.9, 0.95))
-#optimizer = torch.optim.Adam(reward_model.parameters(), lr = 0.00001, betas=(0.9, 0.95))
-scaler = GradScaler()
+#reward_model.gradient_checkpointing_enable()
 
 start_time = time.time()
 batch = 1
-ratio = 0.5
 
-np.random.seed(42)
-np.random.shuffle(first_indices)
+dataset = load_dataset('nvidia/HelpSteer', split="validation")
+first_indices, pair_map = HelpSteer_pair_generate(index_file = 'temp/prompt_index_helpsteer_val.npy')
+#np.random.seed(42)
+#np.random.shuffle(first_indices)
 
-for epoch in range(5): # epochs
-    for i in range(len(first_indices) // batch):
-        optimizer_1.zero_grad()
-        optimizer_2.zero_grad()
-        temp_inds = first_indices[i * batch : (i + 1) * batch]
-        temp_pairs = pair_map[temp_inds]
-        sentence_input_0 = []
-        sentence_input_1 = []
-        win_flag = []
-        for k in range(batch):
-            prompt = dataset['prompt'][temp_inds[k]]
-            token = tokenizer(prompt,
-                          padding = True,
-                          truncation = True,
-                          return_tensors = 'pt',
-                          max_length=512) # 1024
-            if torch.sum(token['attention_mask']) > 500: # 1000
-                continue
-            response_0 = dataset['response'][temp_inds[k]]
-            helpfulness_0 = dataset['helpfulness'][temp_inds[k]]
-            verbosity_0 = dataset['verbosity'][temp_inds[k]]
-            response_1 = dataset['response'][temp_pairs[k]]
-            helpfulness_1 = dataset['helpfulness'][temp_pairs[k]]
-            verbosity_1 = dataset['verbosity'][temp_pairs[k]]
-            sentence_input_0.append(prompt + response_0)
-            sentence_input_1.append(prompt + response_1)
-            p_helpfulness = torch.sigmoid(10 * torch.tensor(helpfulness_0 - helpfulness_1))
-            p_verbosity = torch.sigmoid(10 * torch.tensor(verbosity_0 - verbosity_1))
-            win_flag.append([torch.rand(1).item() < p_helpfulness, torch.rand(1).item() < p_verbosity])
-
-        if len(sentence_input_0) == 0:
+loss = torch.zeros(2, inds)
+count = torch.zeros(2, inds)
+c = 0
+for i in range(len(first_indices) // batch):
+    temp_inds = first_indices[i * batch : (i + 1) * batch]
+    temp_pairs = pair_map[temp_inds]
+    sentence_input_0 = []
+    sentence_input_1 = []
+    win_flag = []
+    for k in range(batch):
+        prompt = dataset['prompt'][temp_inds[k]]
+        token = tokenizer(prompt,
+                      padding = True,
+                      truncation = True,
+                      return_tensors = 'pt',
+                      max_length=512)                       # 1024
+        if torch.sum(token['attention_mask']) > 500:        # 1000
             continue
-        token = tokenizer(sentence_input_0 + sentence_input_1,
-                          padding = True,
-                          truncation = True,
-                          return_tensors = 'pt',
-                          max_length=512) 
-
-        print(i, torch.sum(token['attention_mask'], dim=-1))
-
-        for k, v in token.items():
-            token[k] = v.to(device)
-            print(k, token[k].device, token[k].dtype)
-
-        print_gpu_memory()
-
-        with autocast():
-            with torch.no_grad():
-                p = []
-                for k in range(inds):
-                    force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
-                    reward_model.index = k
-                    output = reward_model(**token)
-                    p.append(output["probability"])
-                base_probs = torch.stack(p, dim=1) # bs, inds=10
-                w = torch.softmax(reward_model.weight, dim=0) # inds
-                base_prob = torch.matmul(base_probs, w) # bs
-            
-                print_gpu_memory()
-        base_prob = base_prob.float()
-        p = torch.matmul(base_probs, torch.softmax(reward_model.weight, dim=0))
-        loss = 0.
-        flag_list = []
-        for k in range(len(sentence_input_0)):
-            if torch.rand(1) < ratio:
-                flag = win_flag[k][0]
-            else:
-                flag = win_flag[k][1]
-
-            if flag:
-                loss += - torch.log(p[k])
-                flag_list.append(0.)
-            else:
-                loss += - torch.log(1 - p[k])
-                flag_list.append(1.)
-        loss = loss / len(sentence_input_0)
-        #wandb.log({
-        #    'loss': loss.item(),
-        #})
-        loss.backward()
-        optimizer_2.step()
-
-        #scaler.scale(loss).backward()
-        flag_list = torch.tensor(flag_list).to(device)
-
-        for k in range(inds):
-            print(k)
-            force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
-            reward_model.index = k
-            with autocast():
+        response_0 = dataset['response'][temp_inds[k]]
+        helpfulness_0 = dataset['helpfulness'][temp_inds[k]]
+        verbosity_0 = dataset['verbosity'][temp_inds[k]]
+        response_1 = dataset['response'][temp_pairs[k]]
+        helpfulness_1 = dataset['helpfulness'][temp_pairs[k]]
+        verbosity_1 = dataset['verbosity'][temp_pairs[k]]
+        sentence_input_0.append(prompt + response_0)
+        sentence_input_1.append(prompt + response_1)
+        p_helpfulness = torch.sigmoid(10 * torch.tensor(helpfulness_0 - helpfulness_1))
+        p_verbosity = torch.sigmoid(10 * torch.tensor(verbosity_0 - verbosity_1))
+        win_flag.append([0.5 < p_helpfulness, 0.5 < p_verbosity])
+    if len(sentence_input_0) == 0:
+        continue
+    token = tokenizer(sentence_input_0 + sentence_input_1,
+                      padding = True,
+                      truncation = True,
+                      return_tensors = 'pt',
+                      max_length=512)                       # 1024
+    #print(i, torch.sum(token['attention_mask'], dim=-1))
+    for k, v in token.items():
+        token[k] = v.to(device)
+        #print(k, token[k].device, token[k].dtype)
+    print_gpu_memory()
+    with autocast():
+        with torch.no_grad():
+            for k in range(inds):
+                force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
+                reward_model.index = k
                 output = reward_model(**token)
-                p = output["probability"]
-                #print(p.dtype)
-                loss = torch.mean(w[k] * p / (flag_list - base_prob))
-            print_gpu_memory()
-            #scaler.scale(loss).backward()
-            loss.backward()
+                for l, p in enumerate(output["probability"]):
+                    p = p.cpu()
+                    print(p)
+                    c += 1
+                    for v in range(2):
+                        if win_flag[l][v]:
+                            loss[v, k] += - torch.log(p)
+                            if p > 0.5:
+                                count[v, k] += 1
+                        else:
+                            loss[v, k] += - torch.log(1 - p)
+                            if p <= 0.5:
+                                count[v, k] += 1
+    print_gpu_memory()
 
-        optimizer_1.step()
-        #scaler.step(optimizer_1)
-        #scaler.update()
-
-        del loss, token, p, flag_list
-        torch.cuda.empty_cache()
-        gc.collect()
-
-        #for n, p in reward_model.named_parameters():
-        #    if p.requires_grad:
-        #        print(n, p.requires_grad, p.dtype, p.grad.dtype)
-        #    else:
-        #        print(n, p.requires_grad, p.dtype, type(p.grad))
-
-    reward_model.save_pretrained('ckpt/HelpSteer_mix_0.5_epoch_' + str(epoch))
+torch.save({
+    'loss': loss / c,
+    'acc': count / c
+}, 'two_reward_acc_test.out') # model_name + '_two_reward_acc_test.out'
 
 end_time = time.time()
 print('time:', end_time - start_time)
-
-#wandb.finish()
