@@ -4,51 +4,57 @@ from lora import LinearLayer_LoRA
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from peft.tuners.tuners_utils import BaseTunerLayer
 
-def evaluate(model, tokenizer, dataset, device, batch = 1, inds = 10):
-    sentiment_score_model = AutoModelForSequenceClassification.from_pretrained("lvwerra/distilbert-imdb")
-    sentiment_score_tokenizer = AutoTokenizer.from_pretrained("lvwerra/distilbert-imdb")
-    def sentiment_positive_prob(prompts):
-        t = sentiment_score_tokenizer(prompts, return_tensors='pt', padding=True, truncation=True)
-        out = sentiment_score_model(**t)
-        posi_prob = torch.softmax(out[0], dim=-1)[:, 1]
-        return posi_prob
+sentiment_score_model = AutoModelForSequenceClassification.from_pretrained("lvwerra/distilbert-imdb")
+sentiment_score_tokenizer = AutoTokenizer.from_pretrained("lvwerra/distilbert-imdb")
+def sentiment_positive_prob(prompts):
+    t = sentiment_score_tokenizer(prompts, return_tensors='pt', padding=True, truncation=True)
+    out = sentiment_score_model(**t)
+    posi_prob = torch.softmax(out[0], dim=-1)[:, 1]
+    return posi_prob
 
+def evaluate(model, tokenizer, dataset, device, batch = 1, inds = 10):
     model.eval()
     senti_loss = [0. for _ in range(inds)]
     senti_correct = [0 for _ in range(inds)]
     brev_loss = [0. for _ in range(inds)]
     brev_correct = [0 for _ in range(inds)]
-    l = len(dataset['text'])
+    l = 2000 #len(dataset['text'])
     dataset = dataset.shuffle()
     with torch.no_grad():
         for i in range(l // batch):
             #print(i)
             prompt = dataset['text'][i * batch : (i + 1) * batch]
-            #label = dataset['label'][i * batch : (i + 1) * batch]
             token = tokenizer(prompt,
                               return_tensors = 'pt',
                               max_length = 512,
                               padding = True,
                               truncation = True)
             senti_posi = sentiment_positive_prob(prompt)
+
+            win_flag = []
+            verbosity_metric = torch.sum(token['attention_mask'], dim=-1)
+            verbosity_metric = 5 * (verbosity_metric - 266.5457) / 138.8023
+            sentiment_metric = sentiment_positive_prob(prompt)
+            sentiment_metric = 5 * (sentiment_metric - 0.4973) / 0.4654
+            for k in range(batch // 2):
+                sentiment_0 = sentiment_metric[k]
+                verbosity_0 = verbosity_metric[k]
+                sentiment_1 = sentiment_metric[k + batch // 2]
+                verbosity_1 = verbosity_metric[k + batch // 2]
+                win_flag.append([
+                    sentiment_0 - sentiment_1 > 0,
+                    verbosity_0 - verbosity_1 > 0
+                ])
             for k, v in token.items():
                 token[k] = v.to(device)
 
-            flag_list = []
-            for k in range(batch // 2):
-                ll_1 = torch.sum(token['attention_mask'][k]).cpu()
-                ll_2 = torch.sum(token['attention_mask'][batch // 2 + k]).cpu()
-                flag_brev = (ll_1 <= ll_2)
-                flag_senti = (senti_posi[k] >= senti_posi[batch // 2 + k])
-                flag_list.append([flag_senti, flag_brev])
-
             for k in range(inds):
-                LinearLayer_LoRA.index = k
+                force_adapter(model, adapter_names=['adapter_' + str(k),])
                 model.index = k
                 output = model(**token)
                 p = output['probability'] # bs
                 for j in range(batch // 2):
-                    if flag_list[j][1]:
+                    if win_flag[j][1]:
                         brev_loss[k] += -torch.log(p[j]).item()
                         if p[j] > 0.5:
                             brev_correct[k] += 1
@@ -57,7 +63,7 @@ def evaluate(model, tokenizer, dataset, device, batch = 1, inds = 10):
                         if p[j] < 0.5:
                             brev_correct[k] += 1
 
-                    if flag_list[j][0]:
+                    if win_flag[j][0]:
                         senti_loss[k] += -torch.log(p[j]).item()
                         if p[j] > 0.5:
                             senti_correct[k] += 1
@@ -84,7 +90,6 @@ def evaluation_vector(model, tokenizer, dataset, device, batch = 1, inds = 10):
         for i in range(l // batch):
             #print(i)
             prompt = dataset['text'][i * batch : (i + 1) * batch]
-            label = dataset['label'][i * batch : (i + 1) * batch]
             token = tokenizer(prompt,
                               return_tensors = 'pt',
                               max_length = 512,
@@ -93,16 +98,12 @@ def evaluation_vector(model, tokenizer, dataset, device, batch = 1, inds = 10):
             for k, v in token.items():
                 token[k] = v.to(device)
             for k in range(inds):
-                LinearLayer_LoRA.index = k
+                force_adapter(model, adapter_names=['adapter_' + str(k),])
                 model.index = k
                 output = model.forward_value(**token)
                 p = output['probability'] # bs
                 for j in range(batch):
                     vectors[k].append(-torch.log(1 / p[j] - 1))
-
-            del token, output, p
-            torch.cuda.empty_cache()
-
     model.train()
     vectors = torch.tensor(vectors)
 

@@ -22,17 +22,17 @@ import wandb
 from model import RewardModel
 from utils import force_adapter
 
-inds = 10
+inds = 1
 #torch.set_default_dtype(torch.float16)
 # set device
-device = 'cuda:1'
+device = 'cuda:2'
 device_map = {
     '': device,
 }
 
 wandb.init(
     project = 'ensemble reward model with LoRA',
-    name = 'training LoRA ensemble - IMDB'
+    name = 'training LoRA - IMDB - 0.5 - uni'
 )
 
 sentiment_score_tokenizer = AutoTokenizer.from_pretrained("lvwerra/distilbert-imdb")
@@ -82,17 +82,24 @@ reward_model = RewardModel(
 #for n, p in reward_model.named_parameters():
 #    print(n, p.dtype, p.requires_grad, p.device)
 #print()
+#reward_model.load_state_dict(torch.load("./ckpt/IMDB_LoRA_Ensemble_0.5_epoch_4.ckpt", map_location=device))
 
-dataset = load_dataset('imdb', split="train")
+o_dataset = load_dataset('imdb', split="train")
+len_dataset = o_dataset.num_rows
+print(len_dataset)
+preferences = torch.load('preferences/preference_d2_0.pt')
+preferences = preferences['uni']
 
 optimizer = torch.optim.Adam(reward_model.parameters(), lr = 0.00001, betas=(0.9, 0.95))
 
 start_time = time.time()
 batch = 10
-ratio = 0.5
 
 for epoch in range(5): # epochs
-    dataset = dataset.shuffle()
+    original_indices = np.arange(len_dataset)
+    np.random.shuffle(original_indices)
+    preferences_shuffled = preferences[torch.tensor(original_indices)]
+    dataset = o_dataset.select(original_indices)
     for i in range(len(dataset['text']) // batch):
         #print(10 * '-' + 'i = ' + str(i) + 10 * '-')
         win_flag = []
@@ -108,19 +115,18 @@ for epoch in range(5): # epochs
         verbosity_metric = 5 * (verbosity_metric - 266.5457) / 138.8023
         sentiment_metric = sentiment_positive_prob(prompt)
         sentiment_metric = 5 * (sentiment_metric - 0.4973) / 0.4654
+        temp_preferences = preferences_shuffled[i * batch : (i + 1) * batch]
         for k in range(batch // 2):
             sentiment_0 = sentiment_metric[k]
             verbosity_0 = verbosity_metric[k]
             sentiment_1 = sentiment_metric[k + batch // 2]
             verbosity_1 = verbosity_metric[k + batch // 2]
-            p_sentiment = torch.sigmoid(sentiment_0 - sentiment_1)
-            p_verbosity = torch.sigmoid(verbosity_0 - verbosity_1)
-            win_flag.append([torch.rand(1).item() < p_sentiment.item(),
-                             torch.rand(1).item() < p_verbosity.item()])
+            p = torch.sigmoid(temp_preferences[k, 0] * (sentiment_0 - sentiment_1) +
+                              temp_preferences[k, 1] * (verbosity_0 - verbosity_1))
+            win_flag.append(torch.rand(1).item() < p.item())
 
         for k, v in token.items():
             token[k] = v.to(device)
-            #print(k, token[k])
 
         with torch.no_grad():
             p = []
@@ -138,12 +144,7 @@ for epoch in range(5): # epochs
         loss = 0.
         flag_list = []
         for k in range(batch // 2):
-            if torch.rand(1) < ratio:
-                flag = win_flag[k][0]
-            else:
-                flag = win_flag[k][1]
-
-            if flag:
+            if win_flag[k]:
                 loss += - torch.log(p[k])
                 flag_list.append(0.)
             else:
@@ -172,19 +173,9 @@ for epoch in range(5): # epochs
             loss = torch.mean(w[k] * p / (flag_list - base_prob))
             #print('here ' + str(k) + ' : ', loss.dtype)
             loss.backward()
-
-        #print('reward model')
-        #for n, p in reward_model.named_parameters():
-        #    if (n == 'rwtransformer.decoder.layers.0.self_attn.v_proj.lora_A.adapter_0.weight' or
-        #        n == 'rwtransformer.decoder.layers.0.self_attn.v_proj.lora_B.adapter_0.weight' or
-        #        n == 'rwtransformer.decoder.layers.0.self_attn.v_proj.lora_A.adapter_1.weight' or
-        #        n == 'rwtransformer.decoder.layers.0.self_attn.v_proj.lora_B.adapter_1.weight'):
-        #        print(n, p.grad)
-        #print()
-
         optimizer.step()
         optimizer.zero_grad()
-    torch.save(reward_model.state_dict(), 'ckpt/IMDB_LoRA_Ensemble_0.5_epoch_' + str(epoch) + '.ckpt')
+    torch.save(reward_model.state_dict(), 'ckpt/IMDB_LoRA_epoch_' + str(epoch) + '_uni.ckpt')
 
 end_time = time.time()
 print('time:', end_time - start_time)

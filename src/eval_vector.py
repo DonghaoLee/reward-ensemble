@@ -5,39 +5,65 @@ import torch.nn as nn
 import numpy as np
 import transformers
 from transformers import AutoTokenizer, AutoModel
+from peft import (
+    prepare_model_for_kbit_training, 
+    LoraConfig, 
+    get_peft_model
+)
 from datasets import load_dataset
 
 import wandb
 
 from model import RewardModel
-from lora import LinearLayer_LoRA, convert_linear_layer_to_lora, only_optimize_lora_parameters
 from utils import evaluation_vector
 
-# load dataset. Here I use the hh-rlhf dataset. More details can be found in
-# https://huggingface.co/datasets/Anthropic/hh-rlhf
-imdb_dataset = load_dataset("imdb")
-# load model. More details can be found in
-# https://huggingface.co/facebook/opt-350m
-model = AutoModel.from_pretrained('facebook/opt-350m')
-# load tokenizer. It will embeds the input sentence.
+inds = 10
+device = 'cuda:0'
+device_map = {
+    '': device,
+}
+
+# load dataset
+imdb_dataset = load_dataset("imdb", split='test')
+
+# load tokenizer. It will embed the input sentence.
 tokenizer = AutoTokenizer.from_pretrained('facebook/opt-350m',
                                           padding_side = 'right',
                                           truncation_side = 'right')
 
-# Set the device. No parallel.
-device = "cuda:1"
-
-# load a reward model
-reward_model = RewardModel(tokenizer, model)
-convert_linear_layer_to_lora(reward_model, "layers.", lora_dim = 64, inds = 10)
-reward_model.load_state_dict(torch.load("./ckpt/mix_reward_model_brev_epoch_4.ckpt"))
-reward_model = reward_model.to(device)
+# load model
+model = AutoModel.from_pretrained(
+    'facebook/opt-350m',
+    device_map = device_map,
+    #torch_dtype=torch.float16
+)
+config = LoraConfig(
+    r=32, 
+    lora_alpha=1, 
+    target_modules=['k_proj', 'q_proj', 'v_proj', 'out_proj', "fc1", "fc2"], 
+    lora_dropout=0.00, 
+    bias="none", 
+    task_type="CAUSAL_LM"
+)
+for ind in range(inds):
+    model.add_adapter(config, 'adapter_' + str(ind))
+model.set_adapter(['adapter_' + str(ind) for ind in range(inds)])
+reward_model = RewardModel(
+    tokenizer, 
+    model, 
+    inds = inds, 
+    device = device, 
+    num_padding_at_beginning=1
+)
+reward_model.load_state_dict(torch.load("./ckpt/IMDB_LoRA_Ensemble_0.5_epoch_4_uni.ckpt", map_location=device_map))
+for n, p in reward_model.named_parameters():
+    print(n, p.device)
 
 start_time = time.time()
 
 print(torch.softmax(reward_model.weight, dim=0))
-vectors = evaluation_vector(reward_model, tokenizer, imdb_dataset['test'], device, batch = 50)
-torch.save(vectors, "./ckpt/vector_test_brev_epoch_4.out")
+vectors = evaluation_vector(reward_model, tokenizer, imdb_dataset, device, batch = 100)
+torch.save(vectors, "./ckpt/vector_test_IMDB_0.5_epoch_4_uni.out")
 
 end_time = time.time()
 print('time:', end_time - start_time)

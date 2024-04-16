@@ -3,70 +3,113 @@ import time
 import torch
 import torch.nn as nn
 import numpy as np
-import transformers
-from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
+from transformers import (
+    AutoTokenizer, 
+    AutoModel, 
+    AutoModelForSequenceClassification, 
+    BitsAndBytesConfig
+)
+from peft import (
+    prepare_model_for_kbit_training, 
+    LoraConfig, 
+    get_peft_model
+)
+from peft.tuners.tuners_utils import BaseTunerLayer
 from datasets import load_dataset
 
 import wandb
 
 from model import RewardModel
-from lora import LinearLayer_LoRA, convert_linear_layer_to_lora, only_optimize_lora_parameters
+from utils import force_adapter
 
-# wandb is used as a logging tool. This is the initialization of wandb.
-w = torch.tensor([0.3, 0.7]) # senti, brev
+inds = 2
+#torch.set_default_dtype(torch.float16)
+# set device
+device = 'cuda:1'
+device_map = {
+    '': device,
+}
+
 wandb.init(
-    project = 'ensemble reward model with LoRA',
-    group = 'learn preferences',
-    name = 'learning preference, w = (0.3, 0.7)'
+    project = 'preference learning',
+    name = 'from EM_uni_epoch_4 learn pref'
 )
 
-# load dataset. Here I use the hh-rlhf dataset. More details can be found in
-# https://huggingface.co/datasets/Anthropic/hh-rlhf
-imdb_dataset = load_dataset("imdb")
-# load model. More details can be found in
-# https://huggingface.co/facebook/opt-350m
-model = AutoModel.from_pretrained('facebook/opt-350m')
-sentiment_score_model = AutoModelForSequenceClassification.from_pretrained("lvwerra/distilbert-imdb")
-# load tokenizer. It will embeds the input sentence.
-tokenizer = AutoTokenizer.from_pretrained('facebook/opt-350m',
-                                          padding_side = 'right',
-                                          truncation_side = 'right')
 sentiment_score_tokenizer = AutoTokenizer.from_pretrained("lvwerra/distilbert-imdb")
+tokenizer = AutoTokenizer.from_pretrained('facebook/opt-350m')
+tokenizer.padding_side = 'right'
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.add_eos_token = True
 
+sentiment_score_model = AutoModelForSequenceClassification.from_pretrained(
+    "lvwerra/distilbert-imdb",
+    device_map = device_map,
+    #torch_dtype=torch.float16
+)
 def sentiment_positive_prob(prompts):
-    t = sentiment_score_tokenizer(prompts, return_tensors='pt', padding=True, truncation=True)
     with torch.no_grad():
+        t = sentiment_score_tokenizer(prompts, return_tensors='pt', padding=True, truncation=True).to(device)
         out = sentiment_score_model(**t)
-        posi_prob = torch.softmax(out[0], dim=-1)[:, 1]
+        posi_prob = torch.softmax(out[0], dim=-1)[:, 1].to('cpu')
     return posi_prob
 
-# Set the device. No parallel.
-device = "cuda:3"
+model = AutoModel.from_pretrained(
+    'facebook/opt-350m',
+    device_map = device_map,
+    #torch_dtype=torch.float16
+)
 
-# Build a reward model
-reward_model = RewardModel(tokenizer, model, inds = 10)
-convert_linear_layer_to_lora(reward_model, "layers.", lora_dim = 64, inds = 10)
-# load model if necessary
-reward_model.load_state_dict(torch.load('ckpt/mix_reward_model_0.5_epoch_4.ckpt'))
-reward_model = reward_model.to(device)
-# Set the optimizer. The following optimizer may not be optimal.
-# It just works in this program.
-# lr schedule is expected in the future.
-weight = torch.ones(10) / 10.
+config = LoraConfig(
+    r=32, 
+    lora_alpha=1, 
+    target_modules=['k_proj', 'q_proj', 'v_proj', 'out_proj', "fc1", "fc2"], 
+    lora_dropout=0.00, 
+    bias="none", 
+    task_type="CAUSAL_LM"
+)
+
+for ind in range(inds):
+    model.add_adapter(config, 'adapter_' + str(ind))
+model.set_adapter(['adapter_' + str(ind) for ind in range(inds)])
+reward_model = RewardModel(
+    tokenizer, 
+    model, 
+    inds = inds, 
+    device = device, 
+    num_padding_at_beginning=1
+)
+
+reward_model.load_state_dict(torch.load("./ckpt/IMDB_LoRA_EM_epoch_4_uni.ckpt", map_location=device_map))
+#print('reward model')
+#for n, p in reward_model.named_parameters():
+#    print(n, p.dtype, p.requires_grad, p.device)
+#print()
+
+o_dataset = load_dataset('imdb', split="train")
+len_dataset = o_dataset.num_rows
+
+weight = torch.ones([5, inds]) / inds
 weight = weight.to(device)
 weight.requires_grad = True
 optimizer = torch.optim.Adam([weight], lr = 0.01, betas=(0.9, 0.95))
 
 start_time = time.time()
-batch = 20
+batch = 40
 
-dataset = imdb_dataset['train'].shuffle().select(range(200))
+dataset = o_dataset.shuffle().select(range(200))
 
-for epoch in range(20): # 2 epochs
+#[np.cos(np.pi / 4), np.sin(np.pi / 4)]
+preferences = [[1.0, 0.0], 
+              [np.cos(np.pi / 8), np.sin(np.pi / 8)],
+              [np.cos(np.pi / 4), np.sin(np.pi / 4)],
+              [np.cos(3 * np.pi / 8), np.sin(3 * np.pi / 8)],
+              [0.0, 1.0]] 
+
+for epoch in range(40): # 2 epochs
     # It will be a better idea to use DatasetLoader in Pytorch to load the data
     # Here I just use the shuffle.
     # dataset = dataset.shuffle()
-    avg_loss = 0.
+    avg_loss = [0. for _ in range(5)]
     for i in range(len(dataset['text']) // batch):
         prompt = dataset['text'][i * batch : (i + 1) * batch]
         # label = dataset['label'][i * batch : (i + 1) * batch]
@@ -76,58 +119,64 @@ for epoch in range(20): # 2 epochs
                           truncation = True,
                           return_tensors = 'pt',
                           max_length=512)
-        senti_posi = sentiment_positive_prob(prompt)
-        senti_posi = (senti_posi - 0.4973) / 0.4654
-        ll = torch.sum(token['attention_mask'], dim=-1)
-        ll_v = (ll - 266.5457) / 138.8023
+        verbosity_metric = torch.sum(token['attention_mask'], dim=-1)
+        verbosity_metric = 5 * (verbosity_metric - 266.5457) / 138.8023
+        sentiment_metric = sentiment_positive_prob(prompt)
+        sentiment_metric = 5 * (sentiment_metric - 0.4973) / 0.4654
+
+        win_flag = [[] for _ in range(5)]
+        for k in range(batch // 2):
+            sentiment_0 = sentiment_metric[k]
+            verbosity_0 = verbosity_metric[k]
+            sentiment_1 = sentiment_metric[k + batch // 2]
+            verbosity_1 = verbosity_metric[k + batch // 2]
+            for l in range(5):
+                p = torch.sigmoid(preferences[l][0] * (sentiment_0 - sentiment_1) +
+                                  preferences[l][1] * (verbosity_0 - verbosity_1))
+                win_flag[l].append(torch.rand(1).item() < p.item())
+
         for k, v in token.items():
             token[k] = v.to(device)
 
         with torch.no_grad():
-            value_list = []
-            for k in range(10):
-                LinearLayer_LoRA.index = k
+            chosen_scores = []
+            rejected_scores = []
+            for k in range(inds):
+                force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
                 reward_model.index = k
-                output = reward_model.forward_value(**token)
-                values = output['values'] # bs, length
-                value_list.append(values)
-            values = torch.stack(value_list, dim=-1) # bs, length, inds
-        values = torch.matmul(values, weight) # bs, length
+                output = reward_model(**token)
+                chosen_scores.append(output["chosen_scores"])
+                rejected_scores.append(output["rejected_scores"])
         
-        p_list = []
-        for k in range(batch // 2):
-            ll_1 = ll[k].item()
-            ll_2 = ll[batch // 2 + k].item()
-            end_ind = int(max(ll_1, ll_2))
-            chosen_values = values[k, :end_ind]
-            rejected_values = values[batch // 2 + k, :end_ind]
-            p_list.append(torch.exp(torch.nn.functional.logsigmoid(chosen_values -
-                                                    rejected_values).mean()))
-        p = torch.stack(p_list) # bs // 2
-        loss = 0.
-        flag_list = []
-        for k in range(batch // 2):
-            flag = ((w[0] * ll_v[k].item() - w[1] * senti_posi[k]) <= 
-                    (w[0] * ll_v[batch // 2 + k].item() - w[1] * senti_posi[batch // 2 + k]))
-
-            if flag:
-                loss += - torch.log(p[k])
-                flag_list.append(0.)
-            else:
-                loss += - torch.log(1 - p[k])
-                flag_list.append(1.)
-        loss = loss / (batch // 2)
-        loss.backward()
+        for l in range(5):
+            p = []
+            for j in range(batch // 2):
+                chosen = 0
+                rejected = 0
+                for k in range(inds):
+                    chosen += weight[l, k] * chosen_scores[k][j]
+                    rejected += weight[l, k] * rejected_scores[k][j]
+                p.append(torch.exp(torch.nn.functional.logsigmoid(chosen - rejected).mean()))
+            loss = 0.
+            for k in range(batch // 2):
+                if win_flag[l][k]:
+                    loss += - torch.log(p[k])
+                else:
+                    loss += - torch.log(1 - p[k])
+            loss = loss / (batch // 2)
+            loss.backward()
+            avg_loss[l] += loss.detach().item()
         optimizer.step()
         optimizer.zero_grad()
-        avg_loss += loss.detach().item()
-    avg_loss = avg_loss / 10.
-    wandb.log({
-        'loss': avg_loss,
-    })
+    
+    for l in range(5):
+        avg_loss[l] = avg_loss[l] / 5.
+        wandb.log({
+            'loss' + str(l): avg_loss[l],
+        })
 
     # torch.save(reward_model.state_dict(), 'ckpt/mix_reward_model_0.5_epoch_' + str(epoch) + '.ckpt')
-    torch.save(weight, 'ckpt/mix_reward_model_0.5_w_0.3_0.7_weight.out')
+    torch.save(weight, 'ckpt/reward_uni_weight.out')
 
 end_time = time.time()
 print('time:', end_time - start_time)
