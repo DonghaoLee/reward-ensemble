@@ -22,7 +22,7 @@ inds = 2
 #torch.set_default_dtype(torch.float16)
 
 # set device
-def print_gpu_memory(flag=True):
+def print_gpu_memory(flag=False):
     if flag:
         os.system('nvidia-smi --query-gpu=memory.used --format=csv -i 2 | tail -1')
 device = 'cuda:2'
@@ -68,7 +68,7 @@ reward_model.load_pretrained('ckpt/test_save')
 #reward_model.gradient_checkpointing_enable()
 
 start_time = time.time()
-batch = 1
+batch = 10
 
 dataset = load_dataset('nvidia/HelpSteer', split="validation")
 first_indices, pair_map = HelpSteer_pair_generate(index_file = 'temp/prompt_index_helpsteer_val.npy')
@@ -116,17 +116,17 @@ for i in range(len(first_indices) // batch):
         token[k] = v.to(device)
         #print(k, token[k].device, token[k].dtype)
     print_gpu_memory()
+    print(win_flag)
     with autocast():
         with torch.no_grad():
             for k in range(inds):
                 force_adapter(reward_model, adapter_names=['adapter_' + str(k),])
                 reward_model.index = k
                 output = reward_model(**token)
+                #print('k=', k, ' p=', output["probability"].cpu())
                 for l, p in enumerate(output["probability"]):
                     p = p.cpu()
-                    print(p)
-                    c += 1
-                    for v in range(2):
+                    for v in range(2): #helpfulness or verbosity
                         if win_flag[l][v]:
                             loss[v, k] += - torch.log(p)
                             if p > 0.5:
@@ -135,12 +135,18 @@ for i in range(len(first_indices) // batch):
                             loss[v, k] += - torch.log(1 - p)
                             if p <= 0.5:
                                 count[v, k] += 1
+                        print(loss, count)
+    c += len(sentence_input_0)
+    #print('c=', c)
+
     print_gpu_memory()
 
 torch.save({
     'loss': loss / c,
     'acc': count / c
 }, 'two_reward_acc_test.out') # model_name + '_two_reward_acc_test.out'
+
+print(loss / c, count / c)
 
 end_time = time.time()
 print('time:', end_time - start_time)
